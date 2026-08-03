@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# 
+# vibe claude    Start (or resume) this repo's sandbox using Claude Code.
+# vibe opencode  Not implemented yet.
+# vibe pi        Not implemented yet.
+# vibe resume    Resume using whichever harness this repo was last set up with.
+
+
+set -euo pipefail
+
+VIBE_HOME="${VIBE_HOME:-$HOME/.vibe}"
+VIBE_REPO_DIR="$VIBE_HOME/repo"
+IMAGE="vibe-sandbox:latest"
+
+# ---- helpers ----------------------------------------------------------
+
+err() { echo "vibe: $*" >&2; }
+die() { err "$*"; exit 1; }
+
+usage() {
+  cat >&2 <<'EOF'
+usage: vibe <claude|opencode|pi|resume>
+
+  vibe claude     start or resume this repo's sandbox, using Claude Code
+  vibe opencode   (not implemented yet)
+  vibe pi         (not implemented yet)
+  vibe resume     resume using whichever harness this repo last used
+EOF
+  exit 1
+}
+
+require_git_repo() {
+  git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+    || die "not inside a git repository. cd into a repo first."
+}
+
+require_docker() {
+  command -v docker >/dev/null 2>&1 \
+    || die "docker not found. install Docker Desktop and try again."
+}
+
+# Deterministic per-repo identity
+repo_root() { git rev-parse --show-toplevel; }
+
+repo_id() {
+  repo_root | shasum -a 256 | cut -c1-16
+}
+
+container_name() {
+  echo "vibe-$(repo_id)"
+}
+
+# Per-repo state lives entirely under ~/.vibe/
+state_dir() {
+  local dir="$VIBE_HOME/projects/$(repo_id)"
+  mkdir -p "$dir"
+  echo "$dir"
+}
+
+harness_file() { echo "$(state_dir)/harness"; }
+
+recorded_harness() {
+  local f; f="$(harness_file)"
+  [[ -f "$f" ]] && cat "$f" || true
+}
+
+record_harness() {
+  echo "$1" > "$(harness_file)"
+}
+
+# ---- container lifecycle -----------------------------------------------
+
+container_exists() {
+  docker container inspect "$(container_name)" >/dev/null 2>&1
+}
+
+container_running() {
+  [[ "$(docker container inspect -f '{{.State.Running}}' "$(container_name)" 2>/dev/null)" == "true" ]]
+}
+
+# Starts (creating if needed) and execs into the container running the given harness command.
+launch() {
+  local harness_cmd=("$@")
+  local root; root="$(repo_root)"
+
+  if ! container_exists; then
+    echo "==> First run for this repo"
+    echo "    Creating sandbox..."
+    docker run -d \
+      --name "$(container_name)" \
+      -v "$root:/home/vibe/workspace" \
+      -v "$HOME/.claude:/home/vibe/.claude" \
+      -v "$HOME/.claude.json:/home/vibe/.claude.json" \
+      -w /home/vibe/workspace \
+      "$IMAGE" \
+      sleep infinity
+  elif ! container_running; then
+    echo "==> Resuming existing sandbox"
+    docker start "$(container_name)" >/dev/null
+  fi
+
+  docker exec -it "$(container_name)" "${harness_cmd[@]}"
+
+  echo "==> Stopping sandbox"
+  docker stop "$(container_name)" >/dev/null
+}
+
+# ---- harness dispatch ----------------------------------------------------
+
+run_claude() {
+  record_harness "claude"
+  launch claude --dangerously-skip-permissions
+}
+
+not_implemented() {
+  echo "vibe $1: not implemented yet" >&2
+  exit 2
+}
+
+# ---- main ----------------------------------------------------------------
+
+[[ $# -eq 0 ]] && usage
+require_git_repo
+require_docker
+mkdir -p "$VIBE_HOME"
+
+case "$1" in
+  claude)
+    run_claude
+    ;;
+  opencode)
+    not_implemented "opencode"
+    ;;
+  pi)
+    not_implemented "pi"
+    ;;
+  resume)
+    harness="$(recorded_harness)"
+    case "$harness" in
+      claude)   run_claude ;;
+      opencode) not_implemented "opencode" ;;
+      pi)       not_implemented "pi" ;;
+      "")       die "no sandbox set up for this repo yet. run 'vibe claude' first." ;;
+      *)        die "unknown recorded harness '$harness' for this repo." ;;
+    esac
+    ;;
+  -h|--help)
+    usage
+    ;;
+  *)
+    err "unknown command '$1'"
+    usage
+    ;;
+esac
